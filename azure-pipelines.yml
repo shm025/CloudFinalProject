@@ -67,16 +67,21 @@ stages:
       vmImage: 'ubuntu-latest'
 
     steps:
-    - task: Docker@2
-      displayName: 'Build & Push to ACR'
-      inputs:
-        command: 'buildAndPush'
-        containerRegistry: 'ACR-ServiceConnection'
-        repository: '$(IMAGE_NAME)'
-        dockerfile: 'Dockerfile'
-        tags: |
-          $(IMAGE_TAG)
-          latest
+    - script: |
+        docker login CMPS465a202400250.azurecr.io \
+          --username CMPS465a202400250 \
+          --password $(ACR_PASSWORD)
+      displayName: 'Login to ACR'
+
+    - script: |
+        docker build -t CMPS465a202400250.azurecr.io/todo-app:$(Build.BuildId) \
+                     -t CMPS465a202400250.azurecr.io/todo-app:latest .
+      displayName: 'Build Docker image'
+
+    - script: |
+        docker push CMPS465a202400250.azurecr.io/todo-app:$(Build.BuildId)
+        docker push CMPS465a202400250.azurecr.io/todo-app:latest
+      displayName: 'Push to ACR'
 
 # ══════════════════════════════════════════════════════════════
 # STAGE 3 — Deploy to Staging App Service

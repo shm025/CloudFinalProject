@@ -1,0 +1,163 @@
+# ╔══════════════════════════════════════════════════════════════╗
+# ║  CMPS465 — Azure Pipelines CI/CD                           ║
+# ║  Pipeline: Test → Build → Push to ACR → Deploy to App Svc  ║
+# ╚══════════════════════════════════════════════════════════════╝
+
+trigger:
+  branches:
+    include:
+      - main
+      - develop       # CI runs on every branch push
+
+pr:
+  branches:
+    include:
+      - main          # PR checks on main
+
+variables:
+  # ── Replace these with your real values ──────────────────────
+  ACR_NAME: 'cmps465acr'                        # Your ACR name (no .azurecr.io)
+  IMAGE_NAME: 'todo-app'
+  APP_SERVICE_NAME: 'cmps465-todo-prod'         # Production App Service name
+  STAGING_SLOT_NAME: 'staging'                  # Staging slot name
+  RESOURCE_GROUP: 'CMPS465-YourID'
+  # ─────────────────────────────────────────────────────────────
+
+  IMAGE_TAG: '$(Build.BuildId)'
+  FULL_IMAGE: '$(ACR_NAME).azurecr.io/$(IMAGE_NAME):$(IMAGE_TAG)'
+
+# ══════════════════════════════════════════════════════════════
+# STAGE 1 — CI: Install, Test, Build
+# Runs on EVERY push to ANY branch
+# ══════════════════════════════════════════════════════════════
+stages:
+- stage: CI
+  displayName: 'CI — Test & Build'
+  jobs:
+  - job: Test
+    displayName: 'Install & Run Tests'
+    pool:
+      vmImage: 'ubuntu-latest'
+
+    steps:
+    - task: NodeTool@0
+      displayName: 'Use Node.js 20'
+      inputs:
+        versionSpec: '20.x'
+
+    - script: npm ci
+      displayName: 'Install dependencies'
+
+    - script: npm test -- --ci --reporters=default --reporters=jest-junit
+      displayName: 'Run unit tests'
+      env:
+        NODE_ENV: test
+
+    - task: PublishTestResults@2
+      displayName: 'Publish test results'
+      condition: always()
+      inputs:
+        testResultsFormat: 'JUnit'
+        testResultsFiles: '**/junit.xml'
+        failTaskOnFailedTests: true
+
+    - task: PublishCodeCoverageResults@1
+      displayName: 'Publish coverage report'
+      condition: always()
+      inputs:
+        codeCoverageTool: 'Istanbul'
+        summaryFileLocation: 'coverage/lcov.info'
+
+# ══════════════════════════════════════════════════════════════
+# STAGE 2 — Docker Build + Push to ACR
+# Runs ONLY on main branch after CI passes
+# ══════════════════════════════════════════════════════════════
+- stage: Docker
+  displayName: 'Docker — Build & Push to ACR'
+  dependsOn: CI
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+
+  jobs:
+  - job: BuildAndPush
+    displayName: 'Build Docker image & push'
+    pool:
+      vmImage: 'ubuntu-latest'
+
+    steps:
+    - task: Docker@2
+      displayName: 'Build & Push to ACR'
+      inputs:
+        command: 'buildAndPush'
+        containerRegistry: 'ACR-ServiceConnection'   # Name of your service connection
+        repository: '$(IMAGE_NAME)'
+        dockerfile: 'Dockerfile'
+        tags: |
+          $(IMAGE_TAG)
+          latest
+
+# ══════════════════════════════════════════════════════════════
+# STAGE 3 — Deploy to Staging slot
+# Runs after Docker push succeeds
+# ══════════════════════════════════════════════════════════════
+- stage: DeployStaging
+  displayName: 'Deploy — Staging Slot'
+  dependsOn: Docker
+  condition: succeeded()
+
+  jobs:
+  - deployment: DeployToStaging
+    displayName: 'Deploy to staging slot'
+    pool:
+      vmImage: 'ubuntu-latest'
+    environment: 'staging'       # Creates an Environment in Azure DevOps
+
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: AzureWebAppContainer@1
+            displayName: 'Deploy container to staging slot'
+            inputs:
+              azureSubscription: 'Azure-ServiceConnection'   # Your Azure service connection
+              appName: '$(APP_SERVICE_NAME)'
+              slotName: '$(STAGING_SLOT_NAME)'
+              containers: '$(FULL_IMAGE)'
+
+          - script: |
+              echo "✅ Staging deployment complete"
+              echo "🔗 URL: https://$(APP_SERVICE_NAME)-$(STAGING_SLOT_NAME).azurewebsites.net"
+            displayName: 'Print staging URL'
+
+# ══════════════════════════════════════════════════════════════
+# STAGE 4 — Manual Approval Gate → Promote to Production
+# Pauses here and waits for a human to approve in Azure DevOps
+# ══════════════════════════════════════════════════════════════
+- stage: DeployProduction
+  displayName: 'Deploy — Production (Manual Approval)'
+  dependsOn: DeployStaging
+  condition: succeeded()
+
+  jobs:
+  - deployment: DeployToProduction
+    displayName: 'Promote to production'
+    pool:
+      vmImage: 'ubuntu-latest'
+    # ── This environment has an Approval check configured in Azure DevOps ──
+    # Go to: Environments → production → Approvals and checks → Add → Approvals
+    environment: 'production'
+
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: AzureWebAppContainer@1
+            displayName: 'Deploy container to production'
+            inputs:
+              azureSubscription: 'Azure-ServiceConnection'
+              appName: '$(APP_SERVICE_NAME)'
+              containers: '$(FULL_IMAGE)'
+
+          - script: |
+              echo "🚀 Production deployment complete!"
+              echo "🔗 URL: https://$(APP_SERVICE_NAME).azurewebsites.net"
+            displayName: 'Print production URL'

@@ -68,10 +68,12 @@ stages:
 
     steps:
     - script: |
-        docker login CMPS465a202400250.azurecr.io \
+        echo "$(ACR_PASSWORD)" | docker login CMPS465a202400250.azurecr.io \
           --username CMPS465a202400250 \
-          --password $(ACR_PASSWORD)
+          --password-stdin
       displayName: 'Login to ACR'
+      env:
+        ACR_PASSWORD: $(ACR_PASSWORD)
 
     - script: |
         docker build -t CMPS465a202400250.azurecr.io/todo-app:$(Build.BuildId) \
